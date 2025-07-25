@@ -1,23 +1,26 @@
-const { PrismaClient } = require('@prisma/client');
+const { createClient } = require('@supabase/supabase-js');
 
-const prisma = new PrismaClient({
-  log: ['query', 'info', 'warn', 'error'],
-});
+// Initialize Supabase client
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 // Test database connection
 async function connectDB() {
   try {
-    await prisma.$connect();
-    console.log('✅ Database connected successfully');
+    const { data, error } = await supabase.auth.getSession();
+    console.log('✅ Supabase connected successfully');
+    return supabase;
   } catch (error) {
-    console.error('❌ Database connection failed:', error);
+    console.error('❌ Supabase connection failed:', error);
     process.exit(1);
   }
 }
 
 // Graceful shutdown
 process.on('beforeExit', async () => {
-  await prisma.$disconnect();
+  console.log('🔌 Disconnecting from Supabase...');
 });
 
-module.exports = { prisma, connectDB };
+module.exports = { supabase, connectDB };

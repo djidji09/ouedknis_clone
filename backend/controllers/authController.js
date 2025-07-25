@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { prisma } = require('../config/db');
+const { supabase } = require('../config/db');
 const { asyncHandler } = require('../middleware/error');
 
 // Generate JWT token
@@ -17,9 +17,11 @@ const register = asyncHandler(async (req, res) => {
   const { name, email, password, phone } = req.body;
 
   // Check if user already exists
-  const existingUser = await prisma.user.findUnique({
-    where: { email }
-  });
+  const { data: existingUser, error: checkError } = await supabase
+    .from('users')
+    .select('id, email')
+    .eq('email', email)
+    .single();
 
   if (existingUser) {
     return res.status(400).json({
@@ -33,22 +35,24 @@ const register = asyncHandler(async (req, res) => {
   const hashedPassword = await bcrypt.hash(password, saltRounds);
 
   // Create user
-  const user = await prisma.user.create({
-    data: {
+  const { data: user, error: createError } = await supabase
+    .from('users')
+    .insert([{
       name,
       email,
       password: hashedPassword,
       phone: phone || null
-    },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      role: true,
-      createdAt: true
-    }
-  });
+    }])
+    .select('id, name, email, phone, role, created_at')
+    .single();
+
+  if (createError) {
+    return res.status(500).json({
+      success: false,
+      message: 'Error creating user',
+      error: createError.message
+    });
+  }
 
   // Generate token
   const token = generateToken(user.id);
@@ -70,19 +74,13 @@ const login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
   // Check if user exists
-  const user = await prisma.user.findUnique({
-    where: { email },
-    include: {
-      _count: {
-        select: {
-          ads: true,
-          sentMessages: true
-        }
-      }
-    }
-  });
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('*')
+    .eq('email', email)
+    .single();
 
-  if (!user) {
+  if (!user || userError) {
     return res.status(401).json({
       success: false,
       message: 'Invalid email or password'
@@ -90,7 +88,7 @@ const login = asyncHandler(async (req, res) => {
   }
 
   // Check if user is active
-  if (!user.isActive) {
+  if (!user.is_active) {
     return res.status(401).json({
       success: false,
       message: 'Your account has been deactivated'
@@ -108,10 +106,10 @@ const login = asyncHandler(async (req, res) => {
   }
 
   // Update last login
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { lastLogin: new Date() }
-  });
+  await supabase
+    .from('users')
+    .update({ last_login: new Date().toISOString() })
+    .eq('id', user.id);
 
   // Generate token
   const token = generateToken(user.id);
@@ -133,26 +131,18 @@ const login = asyncHandler(async (req, res) => {
 // @route   GET /api/auth/me
 // @access  Private
 const getMe = asyncHandler(async (req, res) => {
-  const user = await prisma.user.findUnique({
-    where: { id: req.user.id },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      role: true,
-      isActive: true,
-      createdAt: true,
-      lastLogin: true,
-      _count: {
-        select: {
-          ads: true,
-          sentMessages: true,
-          receivedMessages: true
-        }
-      }
-    }
-  });
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('id, name, email, phone, role, is_active, created_at, last_login')
+    .eq('id', req.user.id)
+    .single();
+
+  if (error || !user) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found'
+    });
+  }
 
   res.json({
     success: true,
@@ -166,21 +156,25 @@ const getMe = asyncHandler(async (req, res) => {
 const updateProfile = asyncHandler(async (req, res) => {
   const { name, phone } = req.body;
 
-  const updatedUser = await prisma.user.update({
-    where: { id: req.user.id },
-    data: {
-      name: name || undefined,
-      phone: phone || undefined
-    },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      role: true,
-      updatedAt: true
-    }
-  });
+  const updateData = {};
+  if (name) updateData.name = name;
+  if (phone) updateData.phone = phone;
+  updateData.updated_at = new Date().toISOString();
+
+  const { data: updatedUser, error } = await supabase
+    .from('users')
+    .update(updateData)
+    .eq('id', req.user.id)
+    .select('id, name, email, phone, role, updated_at')
+    .single();
+
+  if (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Error updating profile',
+      error: error.message
+    });
+  }
 
   res.json({
     success: true,
@@ -196,9 +190,18 @@ const changePassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
 
   // Get user with password
-  const user = await prisma.user.findUnique({
-    where: { id: req.user.id }
-  });
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', req.user.id)
+    .single();
+
+  if (error || !user) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found'
+    });
+  }
 
   // Check current password
   const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
@@ -215,10 +218,18 @@ const changePassword = asyncHandler(async (req, res) => {
   const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
 
   // Update password
-  await prisma.user.update({
-    where: { id: req.user.id },
-    data: { password: hashedNewPassword }
-  });
+  const { error: updateError } = await supabase
+    .from('users')
+    .update({ password: hashedNewPassword })
+    .eq('id', req.user.id);
+
+  if (updateError) {
+    return res.status(500).json({
+      success: false,
+      message: 'Error updating password',
+      error: updateError.message
+    });
+  }
 
   res.json({
     success: true,
